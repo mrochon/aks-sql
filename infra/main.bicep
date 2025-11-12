@@ -224,7 +224,7 @@ output AZURE_CONTAINER_REGISTRY_NAME string = acr.outputs.name
 
 // SQL outputs
 output AZURE_SQL_SERVER_NAME string = sqlServer.outputs.name
-output AZURE_SQL_SERVER_FQDN string = '${sqlServer.outputs.name}.${environment().suffixes.sqlServerHostname}'
+output AZURE_SQL_SERVER_FQDN string = '${sqlServer.outputs.name}${environment().suffixes.sqlServerHostname}'
 output AZURE_SQL_DATABASE_NAME string = databaseName
 
 // Workload Identity outputs
@@ -232,4 +232,4 @@ output AZURE_CLIENT_ID string = identity.outputs.clientId
 output AZURE_WORKLOAD_IDENTITY_NAME string = identity.outputs.name
 
 // Connection string (without credentials - uses Entra auth)
-output SQL_CONNECTION_STRING string = 'Server=tcp:${sqlServer.outputs.name}.${environment().suffixes.sqlServerHostname},1433;Database=${databaseName};Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;'
+output SQL_CONNECTION_STRING string = 'Server=tcp:${sqlServer.outputs.name}${environment().suffixes.sqlServerHostname},1433;Database=${databaseName};Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;'
