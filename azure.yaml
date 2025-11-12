@@ -1,0 +1,146 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: aks-sql-helloworld
+metadata:
+  template: aks-sql-helloworld@0.0.1
+
+# Note: Using custom hooks for complete control over AKS deployment
+# No service definition needed since we handle everything in hooks
+
+hooks:
+  # After infrastructure provisioning, configure kubectl and deploy manifests
+  postprovision:
+    shell: pwsh
+    run: |
+      Write-Host "Getting AKS credentials..."
+      # Remove aks-preview extension temporarily to avoid API version conflicts
+      $hasPreview = az extension list --query "[?name=='aks-preview'].name" -o tsv
+      if ($hasPreview) {
+        Write-Host "Temporarily removing aks-preview extension..."
+        az extension remove --name aks-preview 2>$null
+      }
+      
+      # Use --admin flag to get cluster admin credentials
+      az aks get-credentials --resource-group $env:AZURE_RESOURCE_GROUP --name $env:AZURE_AKS_CLUSTER_NAME --overwrite-existing --admin
+      
+      # Reinstall aks-preview if it was there
+      if ($hasPreview) {
+        Write-Host "Reinstalling aks-preview extension..."
+        az extension add --name aks-preview --upgrade 2>$null
+      }
+      
+      Write-Host "Waiting for AKS cluster to be ready..."
+      Start-Sleep -Seconds 30
+      
+      # Verify cluster connectivity with retry
+      $maxRetries = 10
+      $retryCount = 0
+      $connected = $false
+      
+      while (-not $connected -and $retryCount -lt $maxRetries) {
+        Write-Host "Testing cluster connectivity... (attempt $($retryCount + 1)/$maxRetries)"
+        $result = kubectl get nodes 2>&1
+        if ($LASTEXITCODE -eq 0) {
+          $connected = $true
+          Write-Host "Successfully connected to AKS cluster!" -ForegroundColor Green
+          Write-Host $result
+        } else {
+          $retryCount++
+          if ($retryCount -lt $maxRetries) {
+            Start-Sleep -Seconds 15
+          }
+        }
+      }
+      
+      if (-not $connected) {
+        Write-Host "Warning: Could not verify cluster connectivity, but proceeding anyway..." -ForegroundColor Yellow
+      }
+      
+      # Replace environment variables in Kubernetes manifests
+      Write-Host "Processing Kubernetes manifests..."
+      $manifestContent = Get-Content ./manifests/deployment.yaml -Raw
+      $manifestContent = $manifestContent -replace '\$\{AZURE_CLIENT_ID\}', $env:AZURE_CLIENT_ID
+      $manifestContent = $manifestContent -replace '\$\{AZURE_TENANT_ID\}', $env:AZURE_TENANT_ID
+      $manifestContent = $manifestContent -replace '\$\{AZURE_CONTAINER_REGISTRY_ENDPOINT\}', $env:AZURE_CONTAINER_REGISTRY_ENDPOINT
+      $manifestContent = $manifestContent -replace '\$\{SQL_CONNECTION_STRING\}', $env:SQL_CONNECTION_STRING
+      $manifestContent | Set-Content ./manifests/deployment-processed.yaml
+      
+      Write-Host "Applying Kubernetes manifests..."
+      kubectl apply -f ./manifests/deployment-processed.yaml --validate=false
+      
+      Write-Host "Waiting for deployment to be ready..."
+      kubectl wait --for=condition=available --timeout=300s deployment/helloworld-app -n helloworld
+      
+      Write-Host ""
+      Write-Host "Deployment complete! Getting service endpoint..."
+      Write-Host ""
+      
+      # Wait for LoadBalancer to get an external IP
+      $maxAttempts = 30
+      $attempt = 0
+      $externalIP = ""
+      
+      while ($attempt -lt $maxAttempts -and [string]::IsNullOrEmpty($externalIP)) {
+        Start-Sleep -Seconds 10
+        $externalIP = kubectl get service helloworld-service -n helloworld -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
+        $attempt++
+        Write-Host "Waiting for LoadBalancer IP... (attempt $attempt/$maxAttempts)"
+      }
+      
+      if (-not [string]::IsNullOrEmpty($externalIP)) {
+        Write-Host ""
+        Write-Host "===============================================" -ForegroundColor Green
+        Write-Host "Application deployed successfully!" -ForegroundColor Green
+        Write-Host "Access your application at: http://$externalIP" -ForegroundColor Cyan
+        Write-Host "===============================================" -ForegroundColor Green
+        Write-Host ""
+      } else {
+        Write-Host "Warning: Could not retrieve LoadBalancer IP. Run 'kubectl get service helloworld-service -n helloworld' to check status." -ForegroundColor Yellow
+      }
+    continueOnError: false
+    interactive: true
+
+  # Before deploying, build and push the Docker image to ACR
+  predeploy:
+    shell: pwsh
+    run: |
+      Write-Host "Building Docker image using Azure Container Registry..."
+      
+      # Build image directly in ACR (doesn't require local Docker)
+      az acr build --registry $env:AZURE_CONTAINER_REGISTRY_NAME --image helloworld:latest ./src/HelloWorldApp
+      
+      Write-Host "Docker image built and pushed successfully!"
+    continueOnError: false
+    interactive: true
+
+  # Deploy updated manifests
+  postdeploy:
+    shell: pwsh
+    run: |
+      # Get AKS credentials (in case kubectl context was lost)
+      az aks get-credentials --resource-group $env:AZURE_RESOURCE_GROUP --name $env:AZURE_AKS_CLUSTER_NAME --overwrite-existing --admin
+      
+      # Replace environment variables in Kubernetes manifests
+      $manifestContent = Get-Content ./manifests/deployment.yaml -Raw
+      $manifestContent = $manifestContent -replace '\$\{AZURE_CLIENT_ID\}', $env:AZURE_CLIENT_ID
+      $manifestContent = $manifestContent -replace '\$\{AZURE_TENANT_ID\}', $env:AZURE_TENANT_ID
+      $manifestContent = $manifestContent -replace '\$\{AZURE_CONTAINER_REGISTRY_ENDPOINT\}', $env:AZURE_CONTAINER_REGISTRY_ENDPOINT
+      $manifestContent = $manifestContent -replace '\$\{SQL_CONNECTION_STRING\}', $env:SQL_CONNECTION_STRING
+      $manifestContent | Set-Content ./manifests/deployment-processed.yaml
+      
+      Write-Host "Applying Kubernetes manifests..."
+      kubectl apply -f ./manifests/deployment-processed.yaml
+      
+      Write-Host "Restarting deployment to pull latest image..."
+      kubectl rollout restart deployment/helloworld-app -n helloworld
+      
+      Write-Host "Waiting for rollout to complete..."
+      kubectl rollout status deployment/helloworld-app -n helloworld
+      
+      $externalIP = kubectl get service helloworld-service -n helloworld -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
+      if (-not [string]::IsNullOrEmpty($externalIP)) {
+        Write-Host ""
+        Write-Host "Application updated! Access at: http://$externalIP" -ForegroundColor Cyan
+      }
+    continueOnError: false
+    interactive: true
